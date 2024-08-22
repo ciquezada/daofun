@@ -1,4 +1,0 @@
-[console_scripts]
-daocube = daocube.daocube:run_daocube
-daofun = daofun.daofun:run_daofun
-specfun = specfun.specfun:run_specfun

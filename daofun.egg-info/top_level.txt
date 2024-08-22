@@ -1,3 +1,0 @@
-daocube
-daofun
-specfun
