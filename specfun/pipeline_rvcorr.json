@@ -1,0 +1,33 @@
+{
+    "Crop": {
+        "spec": "Initial Spectra",
+        "min_wavelength": 8465.0,
+        "max_wavelength": 8935.0
+    },
+    "NaNcorr": {
+        "spec": 0
+    },
+    "NormPoly": {
+        "spec": 1,
+        "plot": false,
+        "save_path": "",
+        "plot_title": ""
+    },
+    "GetRV": {
+        "spec": 2,
+        "grid": "/data/ciquezada/Projects/muse_cubes/downloads/muse_RVgrid",
+        "vmin": -450.0,
+        "vmax": 450.0,
+        "save_plots": false,
+        "save_files": false,
+        "output_folder": "save_path"
+    },
+    "RVcorr": {
+        "spec": "Initial Spectra",
+        "vcorr_best": 3
+    },
+    "SpecSave": {
+        "spec": 4,
+        "save_path": "/data/ciquezada/Projects/muse_cubes/code/daofun/specfun/new_id256_rvcorr.csv"
+    }
+}
