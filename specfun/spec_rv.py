@@ -22,6 +22,10 @@ import argparse
 import os
 import scipy.optimize as opt
 import pandas as pd
+import pymc as pm
+import aesara.tensor as at
+from scipy.stats import gaussian_kde
+import seaborn as sns
 
 
 def oneGauss(x, A, mu, sig):
@@ -39,25 +43,7 @@ def cross_correlate(wobs, fobs, wsin, fsin, vmin, vmax, deltaV=0.5):
         ccf[i] = np.sum(fobs * f_sin_shift(wobs))
     return vels, ccf
 
-def rv_measure(spec, grid, vmin, vmax, save_plots, save_files, output_folder, verbose=False):
-    vlight = 2.997925e5
-    df_obs = spec
-    rin = None
-    rout = None
-    specout_dat_path = os.path.join(output_folder, "spec_vcorr.dat")
-    specout_fits_path = os.path.join(output_folder, "spec_vcorr.fits")
-    specout_rvdat_path = os.path.join(output_folder, "spec_RV.csv")
-    plot_out_path = os.path.join(output_folder, "spec_fit.png")
-
-
-    # Cargar espectro observado desde archivo CSV
-    # df_obs = pd.read_csv(infile)
-    wave = df_obs["wavelength"].values
-    flux = df_obs["flux"].values
-    flux_sig = df_obs["flux_sig"].values
-
-
-
+def load_templates(grid, verbose):
     # Leer lista de archivos fits de grilla de espectros sinteticos
     files_list = os.listdir(grid)
     templates_list = [elem for elem in files_list if ".fits" in elem]
@@ -101,102 +87,43 @@ def rv_measure(spec, grid, vmin, vmax, save_plots, save_files, output_folder, ve
             hparams[3]=float(header_sint["ALFE"])
         params_list[i]=hparams
 
+    return templates_list, fluxes_sint, wave_sint, params_list
 
-    # Calculate the minimum and maximum velocity possible to calculate with the provided grid
-    vlight = 2.997925e5
-    dif_range = wave_sint[-1]-wave_sint[0]-(wave[-1]-wave[0])
-    if dif_range<=0.0:
-        if verbose:
-            print("[Error] Wavelength coverage of template is too short")
-            print(f"\tTemplate/range: {templates_list[i]}/{wave_sint[-1]-wave_sint[0]}")
-            print(f"\tObs spectrum: infile")
-            print(wave[-1]-wave[0])
-        sys.exit()
-    v_min =  vlight*(wave[-1]/wave_sint[-1]-1.0)+4.0
-    v_max =  vlight*(wave[0]/wave_sint[0]-1.0)-4.0
-    if (vmin!=None):
-        v_min=vmin
-    if (vmax!=None):
-        v_max=vmax
-    if (vmin==None) & (vmax==None):
-        if verbose:
-            print(f"[Info] Provided grid allows to compute velocity shifts in({v_min:8.2f},{v_max:8.2f})")
-    if (vmin!=None) & (vmax!=None):
-        if verbose:
-            print(f"[Info] Inputs allow to compute velocity shifts in({v_min:8.2f},{v_max:8.2f})")
+def vmin_vmax(templates_list, wave, wave_sint, vmin, vmax):
+	# Calculate the minimum and maximum velocity possible to calculate with the provided grid
+	vlight = 2.997925e5
+	dif_range = wave_sint[-1]-wave_sint[0]-(wave[-1]-wave[0])
+	if dif_range<=0.0:
+		print("[Error] Wavelength coverage of template is too short")
+		print(f"\tTemplate/range: {templates_list[-1]}/{wave_sint[-1]-wave_sint[0]}")
+		print(f"\tObs spectrum: infile")
+		print(wave_sint[-1]-wave_sint[0], " < ", wave[-1]-wave[0])
+		sys.exit()
+	v_min =  vlight*(wave[-1]/wave_sint[-1]-1.0)+4.0
+	v_max =  vlight*(wave[0]/wave_sint[0]-1.0)-4.0
+	if (vmin!=None):
+		v_min=vmin
+	if (vmax!=None):
+		v_max=vmax
+	if (vmin==None) & (vmax==None):
+		print(f"[Info] Provided grid allows to compute velocity shifts in({v_min:8.2f},{v_max:8.2f})")
+	if (vmin!=None) & (vmax!=None):
+		print(f"[Info] Inputs allow to compute velocity shifts in({v_min:8.2f},{v_max:8.2f})")
+	return v_min, v_max
 
-
-    #  Attempt level-off normalization of input spectrum  --> by-hand recipe, look for smth better!!!
-    median_flux_obs=np.percentile(flux[flux>0.7],75)
-
-    # Define regions to compute cross correlation
-    if (rin!=None):
-        regions = np.genfromtxt(rin)
-        if np.shape(regions)==(2,):
-            regions=[regions]
-    else:
-        regions = np.array([[np.min(wave),np.max(wave)]])
-
-    # Define regions to exclude from the analysis
-    imask_in=np.isfinite(wave)
-    if (rout!=None):
-        regions_out = np.genfromtxt(rout)
-        if np.shape(regions_out)==(2,):
-            regions_out=[regions_out]
-        for region in regions_out:
-            i_mask =  (wave>=region[0]) & (wave<=region[1]) 
-            imask_in = imask_in & ~i_mask
-    flux_masked = np.where(imask_in,flux,0.0)
-
+def find_vcorr_prelim(templates_list, wave, flux_masked, region, median_flux_obs, 
+                                                wave_sint, fluxes_sint, v_min, v_max, verbose):
     #  Make a preliminary cross correlation against a single template (choosen randomly)
     #  to roughly set the observed spectrum into rest frame
     i_prelim_tpl = np.random.randint(len(templates_list))
-    vels=[]
-    vvs=[]
-    ccfs=[]
-    for region in regions:
-        ireg = (wave>=region[0]) & (wave<=region[1]) 
-        vv,ccf = cross_correlate(wave[ireg],flux_masked[ireg]/median_flux_obs,wave_sint,fluxes_sint[i_prelim_tpl],v_min,v_max)
-        vcorr_prelim = vv[np.argmax(ccf)]
-        vels.append(vcorr_prelim)
-        vvs.append(vv)
-        ccfs.append(ccf)
-    vcorr_prelim = np.median(vels)
+    ireg = (wave>=region[0]) & (wave<=region[1]) 
+    vv,ccf = cross_correlate(wave[ireg],flux_masked[ireg]/median_flux_obs,wave_sint,fluxes_sint[i_prelim_tpl],v_min,v_max)
+    vcorr_prelim = vv[np.argmax(ccf)]
     if verbose:
         print(f"[Info] Preliminary Vobs:{vcorr_prelim:8.2f}")
+    return vcorr_prelim, vv, ccf
 
-
-    # START PLOT
-    ##
-    #   Make a diagnostic plot of the whole process
-    #
-    if save_plots:
-        fig = plt.figure(1,figsize=(12,7),facecolor="white")
-        fig.subplots_adjust(left=0.065,bottom=0.07,right=0.98,top=0.98,hspace=0.0,wspace=0.0)
-        gs1 = gridspec.GridSpec(76, 40)
-        fig.canvas.set_window_title('Radial velocity correction [infile]')
-        mpl.rcParams.update({'font.size': 10})
-
-        # Plot first Vcorr
-        ax1=fig.add_subplot(gs1[0:30,0:18])
-        ax1.set_xlim(v_min,v_max)
-        ax1.set_xlabel("RV (km/s)")
-        ax1.set_ylabel("Cross Corr Norm.")
-        for i in range(len(vvs)):
-            ax1.plot(vvs[i], ccfs[i]/np.max(ccfs[i]),color="olivedrab")
-            v_label = v_min+0.07*(v_max-v_min) 
-            i_label=np.argmin(np.absolute(v_label-vvs[i]))
-            ccfy_label = ccfs[i][i_label]/np.max(ccfs[i])
-            ax1.text(v_label,ccfy_label,str(i),color="black",fontsize=10)
-            ax1.axvline(x=vels[i],ls="--",lw=0.6,color="black")
-        ax1.xaxis.set_minor_locator(AutoMinorLocator(5))
-        xl=ax1.get_xlim()
-        yl=ax1.get_ylim()
-        ax1.text(xl[0]+0.7*(xl[1]-xl[0]),yl[0]+0.85*(yl[1]-yl[0]),"Cross-correlation\nguess template",fontsize=11)
-
-    # END PLOT
-
-
+def find_best_template(wave, flux, wave_sint, fluxes_sint, median_flux_obs, vcorr_prelim, templates_list, vlight, region, verbose):
     # Calculate chisquare of obseved rv corrected spectra against grid
     #  We consider only user defineded regions, discarding those indicated 
     fcor = np.sqrt( (1.0-vcorr_prelim/vlight) / (1.0+vcorr_prelim/vlight) )
@@ -209,18 +136,10 @@ def rv_measure(spec, grid, vmin, vmax, save_plots, save_files, output_folder, ve
 
     # Define regions to exclude from the analysis considering the fcor 
     imask_in_corr=np.isfinite(wave_sint[i_cm])
-    if (rout!=None):
-        regions_out = np.genfromtxt(rout)
-        if np.shape(regions_out)==(2,):
-            regions_out=[regions_out]
-        for region in regions_out:
-            i_mask =  (wave_sint[i_cm]>=region[0]*fcor) & (wave_sint[i_cm]<=region[1]*fcor) 
-            imask_in_corr = imask_in_corr & ~i_mask
 
     i_chi = np.zeros(len(wave_sint[i_cm]))
-    for region in regions:
-        icond = (wave_sint[i_cm]>=region[0]*fcor) & (wave_sint[i_cm]<=region[1]*fcor)
-        i_chi = i_chi + icond
+    icond = (wave_sint[i_cm]>=region[0]*fcor) & (wave_sint[i_cm]<=region[1]*fcor)
+    i_chi = i_chi + icond
     i_chi = np.array(i_chi,dtype=bool) & imask_in_corr
 
     chi2=[None]*len(templates_list)
@@ -230,88 +149,194 @@ def rv_measure(spec, grid, vmin, vmax, save_plots, save_files, output_folder, ve
     i_best_hit = np.argmin(chi2)
     if verbose:
         print(f"[Info] Best template chisquare: {chi2[i_best_hit]}")
+    return i_best_hit, i_cm, chi2[i_best_hit]
 
-
-
+def vcorr_maxccf_template(wave, flux_masked, region, median_flux_obs, wave_sint, flux_sint, vcorr_prelim, verbose):
     #  Make correlation with the best template
-    vels=[]
-    vvs=[]
-    ccfs=[]
-    for region in regions:
-        ireg = (wave>=region[0]) & (wave<=region[1])
-        vv,ccf = cross_correlate(wave[ireg],flux_masked[ireg]/median_flux_obs,wave_sint,fluxes_sint[i_best_hit],vmin=vcorr_prelim-35,vmax=vcorr_prelim+35,deltaV=0.025)
-        vcorr_best_discrete = vv[np.argmax(ccf)]
-        vels.append(vcorr_best_discrete)
-        vvs.append(vv)
-        ccfs.append(ccf)
-    vcorr_best_discrete = np.median(vels)
-    vvs=np.array(vvs)
-    ccfs=np.array(ccfs)
-
+    ireg = (wave>=region[0]) & (wave<=region[1])
+    vv,ccf = cross_correlate(wave[ireg],flux_masked[ireg]/median_flux_obs,wave_sint,flux_sint,vmin=vcorr_prelim-35,vmax=vcorr_prelim+35,deltaV=0.025)
+    vcorr_best_discrete = vv[np.argmax(ccf)]
+    vv=np.array(vv)
+    ccf=np.array(ccf)
     ##
     #   Luego de probar algunos metodos para encontrar el maximo con mas exactitud, concluyo que lo mejor es
     #   minimizar una funcion spline cubica construida a partir del 20% mayor de la ccf. El fit de Gaussiana 
     #   no resulta tan bien porque incluso la parte superior de la ccf puede ser levemente asimetrica
     #
-    vels_best=np.empty(len(vels))
-    for i in range(len(vels)):
-        ccf_norm = ccfs[i]/np.max(ccfs[i])
-        ii = ccf_norm > np.percentile(ccf_norm,85)
-        spl_ccf = InterpolatedUnivariateSpline(vvs[i][ii],ccf_norm[ii],k=3)
-        spl_curve = spl_ccf(np.linspace(np.min(vvs[i][ii]),np.max(vvs[i][ii]),1000))
-        fm = lambda x: -spl_ccf(x)
-        vcorr_minimized = opt.minimize_scalar(fm, bounds=(np.min(vvs[i][ii]),np.max(vvs[i][ii])),method="bounded")
-        vcorr_best=vcorr_minimized.x
-        vels_best[i]=vcorr_best
-    vcorr_best = np.median(vels_best)
-    err_vcorr_best = np.std(vels_best)
+    ccf_norm = ccf/np.max(ccf)
+    ii = ccf_norm > np.percentile(ccf_norm,85)
+    spl_ccf = InterpolatedUnivariateSpline(vv[ii],ccf_norm[ii],k=3)
+    spl_curve = spl_ccf(np.linspace(np.min(vv[ii]),np.max(vv[ii]),1000))
+    fm = lambda x: -spl_ccf(x)
+    vcorr_minimized = opt.minimize_scalar(fm, bounds=(np.min(vv[ii]),np.max(vv[ii])),method="bounded")
+    vcorr_best=vcorr_minimized.x
     if verbose:
         print(f"[Info] ccf Vobs:{vcorr_best_discrete:9.3f}")
         print(f"[Info] Final Vobs:{vcorr_best:9.3f}")
-    if len(regions)>1:
-        if verbose:
-            print(f"[Info] Vobs Err:{err_vcorr_best:9.3f}")
+
+    return vcorr_best, vv, ccf
+
+def rv_measure(spec, grid, vmin, vmax, save_plots, save_files, output_folder, verbose=False):
+    vlight = 2.997925e5
+    df_obs = spec
+    rin = None
+    rout = None
+    specout_dat_path = os.path.join(output_folder, "spec_vcorr.dat")
+    specout_fits_path = os.path.join(output_folder, "spec_vcorr.fits")
+    specout_rvdat_path = os.path.join(output_folder, "spec_RV.csv")
+    plot_out_path = os.path.join(output_folder, "spec_fit.png")
+
+
+    def aesara_interpolate(x_new, x, y):
+        # Busca los índices en los que se deberían insertar los nuevos valores de x_new en x
+        idx = at.extra_ops.searchsorted(x, x_new, side="left") - 1
+        idx = at.clip(idx, 0, x.shape[0] - 2)
+        
+        # Selecciona los valores de x e y correspondientes a estos índices
+        x0 = at.take(x, idx)
+        x1 = at.take(x, idx + 1)
+        y0 = at.take(y, idx)
+        y1 = at.take(y, idx + 1)
+        
+        # Calcula la pendiente y realiza la interpolación lineal
+        slope = (y1 - y0) / (x1 - x0)
+        y_new = y0 + slope * (x_new - x0)
+        return y_new
+
+    # Cargar espectro observado desde archivo CSV
+    # df_obs = pd.read_csv(infile)
+    wave = df_obs["wavelength"].values
+    flux = df_obs["flux"].values
+    flux_sig = df_obs["flux_sig"].values
+
+    # print("ejecutando: load_templates")
+    templates_list, fluxes_sint, wave_sint, params_list = load_templates(grid, verbose)
+    v_min, v_max = vmin_vmax(templates_list, wave, wave_sint, vmin, vmax)
+
+    #  Attempt level-off normalization of input spectrum  --> by-hand recipe, look for smth better!!!
+    median_flux_obs=np.percentile(flux[flux>0.7],75)
+
+    # Define regions to compute cross correlation
+    regions = np.array([[np.min(wave),np.max(wave)]])
+    region = [np.min(wave),np.max(wave)]
+
+    # Define regions to exclude from the analysis
+    imask_in=np.isfinite(wave)
+    flux_masked = np.where(imask_in,flux,0.0) # a partir de aqui trabajamos con flux_masked
+
+    ireg = (wave>=region[0]) & (wave<=region[1])
+    imask_in_wave = np.isfinite(wave)
+    wave_ireg, flux_ireg, flux_sig_ireg = (wave[ireg], flux_masked[ireg]/median_flux_obs, flux_sig[ireg])
+
+    #  Make a preliminary cross correlation against a single template (choosen randomly)
+    #  to roughly set the observed spectrum into rest frame
+    vcorr_prelim, vv, ccf = find_vcorr_prelim(templates_list, wave, flux_masked, region, median_flux_obs, 
+                                                wave_sint, fluxes_sint, v_min, v_max, verbose)
+    print("vcorr_prelim: ", vcorr_prelim)
+
+
+    #  Best template is found
+    #  Calculate chisquare of obseved rv corrected spectra against grid
+    #  We consider only user defineded regions, discarding those indicated 
+    i_best_hit, i_cm, chi2 = find_best_template(wave, flux, wave_sint, fluxes_sint, median_flux_obs, vcorr_prelim, templates_list, vlight, region, verbose)
+    flux_sint = fluxes_sint[i_best_hit]
+    # spl = InterpolatedUnivariateSpline(wave_sint, flux_sint, k=3) # interpolate obs spec in common range with template
+
+    # Use PyMC to infer the best template and velocity correction
+    with pm.Model() as model:
+        # Velocity correction as a uniform prior 
+        # between v_min and v_max
+        vcorr = pm.Uniform('vcorr', lower=vcorr_prelim-200, upper=vcorr_prelim+200)
+        # vcorr = pm.Normal('vcorr', mu=vcorr_prelim, sigma=200)
+
+        # Model the observed flux as a function of the selected template and vcorr
+        fcor = pm.math.sqrt((1.0 - vcorr / vlight) / (1.0 + vcorr / vlight))
+        wave_corr = wave_ireg * fcor
+
+        # Interpolating the template to the corrected wavelengths
+        # Realizar la interpolación del flujo de la plantilla para las longitudes de onda corregidas
+        flux_interp = aesara_interpolate(wave_corr, wave_sint, flux_sint)
+
+        # Likelihood function: observed flux follows a normal distribution around the interpolated template flux
+        # likelihood = pm.Normal('obs', mu=flux_interp, sigma=flux_sig_ireg, observed=flux_ireg)
+        pm.Poisson('y', mu=flux_interp, observed=flux_ireg)
+
+        # Perform sampling
+        trace = pm.sample(5000, tune=3000, return_inferencedata=False, cores=6)
+
+
+    # def parameter_sigma(trace, hdi_prob=0.95):
+    #     lower = np.percentile(trace, (1 - hdi_prob) / 2 * 100, axis=0)
+    #     upper = np.percentile(trace, (1 + hdi_prob) / 2 * 100, axis=0)
+    #     return np.mean([np.mean(trace)-lower, upper-np.mean(trace)])
+
+    vcorr_best = np.median(trace['vcorr'])
+    vcorr_best_err = np.std(trace['vcorr'])# * 1.253
+
+    #  Best velocity correction with best template
+    #  Make correlation with the best template
+    # vcorr_best, vv_best, ccf_best = vcorr_maxccf_template(wave, flux_masked, region, median_flux_obs, wave_sint, flux_sint, vcorr_prelim, verbose)
 
     fcor = np.sqrt( (1.0-vcorr_best/vlight) / (1.0+vcorr_best/vlight) )
     wave_best = wave*fcor
+    # Compute template autocorrelation
+    # vv0,ccf0 = cross_correlate(wave_sint[i_cm],flux_sint[i_cm],wave_sint,flux_sint,vmin=-35,vmax=35, deltaV=0.1)
 
 
     # START PLOT
-    # Compute template autocorrelation
+    ##
+    #   Make a diagnostic plot of the whole process
+    #
     if save_plots:
-        vv0,ccf0 = cross_correlate(wave_sint[i_cm],fluxes_sint[i_best_hit][i_cm],wave_sint,fluxes_sint[i_best_hit],vmin=-35,vmax=35, deltaV=0.1)
+
+        # (vv, ccf, vv0, ccf0, vcorr_prelim, vcorr_best, 
+        #             v_min, v_max,
+        #               wave_best, flux, median_flux_obs, 
+        #                 wave_sint, flux_sint, 
+        #                     templates_list, i_best_hit, params_list)
+
+        fig = plt.figure(1,figsize=(12,7),facecolor="white")
+        fig.subplots_adjust(left=0.065,bottom=0.07,right=0.98,top=0.98,hspace=0.0,wspace=0.0)
+        gs1 = gridspec.GridSpec(76, 40)
+        # fig.canvas.set_window_title('Radial velocity correction [infile]')
+        mpl.rcParams.update({'font.size': 10})
+
+        # Plot first Vcorr
+        ax1=fig.add_subplot(gs1[0:30,0:18])
+        # ax1.set_xlim(v_min,v_max)
+        ax1.set_xlabel("RV (km/s)")
+        ax1.set_ylabel("Cross Corr Norm.")
+        ax1.plot(vv, ccf/np.max(ccf),color="olivedrab")
+        v_label = v_min+0.07*(v_max-v_min) 
+        i_label=np.argmin(np.absolute(v_label-vv))
+        ccfy_label = ccf[i_label]/np.max(ccf)
+        ax1.text(v_label,ccfy_label,str(0),color="black",fontsize=10)
+        ax1.axvline(x=vcorr_prelim,ls="--",lw=0.6,color="black")
+        ax1.xaxis.set_minor_locator(AutoMinorLocator(5))
+        xl=ax1.get_xlim()
+        yl=ax1.get_ylim()
+        ax1.text(xl[0]+0.7*(xl[1]-xl[0]),yl[0]+0.85*(yl[1]-yl[0]),"Cross-correlation\nguess template",fontsize=11)
 
         # Plot best Vcorr with all correlation functions
         ax2=fig.add_subplot(gs1[0:30,22:40])
-        ax2.set_xlabel("RV (km/s)")
-        ax2.set_ylabel("Cross Corr Norm.")
-        for i in range(len(ccfs)):
-            ax2.plot(vvs[i], ccfs[i]/np.max(ccfs[i]),color="olivedrab",label="Cross-correlation")
-        handles, labels = ax2.get_legend_handles_labels()
-        handles_gral=[]
-        labels_gral=[]
-        handles_gral.append(handles[0])
-        labels_gral.append(labels[0])
-        ax2.plot(vv0+vcorr_best, ccf0/np.max(ccf0),color="black",ls="--",label="Auto-correlation\ntemplate")
-        handles, labels = ax2.get_legend_handles_labels()
-        handles_gral.append(handles[len(ccfs)])
-        labels_gral.append(labels[len(ccfs)])
-        ax2.xaxis.set_minor_locator(AutoMinorLocator(5))
-        ccf_mins=[]
-        for i in range(len(ccfs)):
-            ccf_mins.append(np.min((np.min(ccfs[i]/np.max(ccfs[i])),np.min(ccf0/np.max(ccf0)))))
-        yplotmin=np.min(ccf_mins)
-        yl_i = yplotmin-0.05*(1.0-yplotmin)
-        yl_s = 1.0+0.1*(1.0-yplotmin)
-        ax2.set_ylim(yl_i,yl_s)
-        xl=ax2.get_xlim()
-        yl=ax2.get_ylim()
-        ax2.legend(handles_gral,labels_gral,loc=2,frameon=False,fontsize=11)
-        #ax2.text(xl[0]+0.68*(xl[1]-xl[0]),yl[0]+0.85*(yl[1]-yl[0]),"Cross-correlation\nbest template")
-        ax2.text(xl[0]+0.60*(xl[1]-xl[0]),yl[0]+0.7*(yl[1]-yl[0]),"Vobs =%9.3f km/s"%vcorr_best,color="tomato",fontsize=11)
-        if len(regions)>1:
-            ax2.text(xl[0]+0.60*(xl[1]-xl[0]),yl[0]+0.63*(yl[1]-yl[0]),"Err Vobs =%9.3f km/s"%err_vcorr_best,color="tomato",fontsize=11)
 
+        # Trazar el histograma con KDE en el eje específico
+        sns.histplot(trace['vcorr'], kde=True, ax=ax2)
+        # Dibujar la distribución de vcorr como un gráfico de pasos
+        # counts, bin_edges = np.histogram(trace['vcorr'], bins=30, density=True)
+        # ax2.step(bin_edges[:-1], counts, where='mid', color='green')
+
+        # Dibujar la línea vertical en la media de vcorr
+        ax2.axvline(vcorr_best, color='tomato', linestyle='-', label=f'Vobs = {vcorr_best:.2f} km/s ± {vcorr_best_err:.0f} km/s')
+
+        # Dibujar las líneas verticales para el rango de error (HDI al 95%)
+        ax2.axvline(vcorr_best - vcorr_best_err, color='blue', linestyle=':')
+        ax2.axvline(vcorr_best + vcorr_best_err, color='blue', linestyle=':')
+
+        # Etiquetas y leyenda
+        ax2.set_xlabel("RV (km/s)")
+        ax2.set_ylabel("Probability Density")
+        ax2.legend()
 
 
         # Plot corrected spectrum vs template
@@ -321,9 +346,9 @@ def rv_measure(spec, grid, vmin, vmax, save_plots, save_files, output_folder, ve
         #ax3.set_xlim(np.min(wave_sint),np.max(wave_sint))
         ax3.set_xlim(np.min(wave_best),np.max(wave_best))
         minx = np.min([np.min(flux/median_flux_obs)+0.04,0.7])
-        ax3.set_ylim(minx,1.15)
+        # ax3.set_ylim(minx,1.15)
         ax3.plot(wave_best,flux/median_flux_obs,lw=0.5,color="black",label="Observed")
-        ax3.plot(wave_sint,fluxes_sint[i_best_hit],lw=0.5,color="red",label="Template")
+        ax3.plot(wave_sint,flux_sint,lw=0.5,color="red",label="Template")
         #ax3.plot(wave_best,flux-(flux_shift-1.0),lw=0.5,color="blue",label="Residual")
         ax3.xaxis.set_minor_locator(AutoMinorLocator(5))
         name_best=templates_list[i_best_hit]
@@ -335,21 +360,9 @@ def rv_measure(spec, grid, vmin, vmax, save_plots, save_files, output_folder, ve
         ax3.text(xl[0]+0.7*(xl[1]-xl[0]),yl[0]+0.07*(yl[1]-yl[0]),"[M/H]=%5.2f"%params_list[i_best_hit][2],fontsize=11)
         ax3.text(xl[0]+0.8*(xl[1]-xl[0]),yl[0]+0.07*(yl[1]-yl[0]),"[a/Fe]=%5.2f"%params_list[i_best_hit][3],fontsize=11)
 
-        # Highlight used regions except if whole spectrum is used
-        if len(regions)>1:
-            for i,region in enumerate(regions):
-                ax3.fill_between(np.linspace(region[0],region[1],1000),yl[0],yl[1],lw=0,color="cornflowerblue",alpha=0.4)
-                ax3.text(region[0],yl[0]+0.90*(yl[1]-yl[0]),str(i),color="black",fontsize=10)
-
         # Highlight excluded regions
-        if (rout!=None):
-            regions_out = np.genfromtxt(rout)
-            if np.shape(regions_out)==(2,):
-                regions_out=[regions_out]
-            for region in regions_out:
-                ax3.fill_between(np.linspace(region[0]*fcor,region[1]*fcor,500),yl[0],yl[1],lw=0,color="tomato",alpha=0.4)
         ax3.set_xlim(xl)
-        ax3.set_ylim(yl)
+        # ax3.set_ylim(yl)
 
 
         # Output or interactive display
@@ -368,68 +381,7 @@ def rv_measure(spec, grid, vmin, vmax, save_plots, save_files, output_folder, ve
     #
     if save_files:
         os.makedirs(output_folder, exist_ok=True)
-        #crval1_new = hdulist_obs[0].header["crval1"]*fcor
-        #cdelt1_new = hdulist_obs[0].header["cdelt1"]*fcor
-        #if "cd1_1" in hdulist_obs[0].header.keys():
-            #cd1_1_new = hdulist_obs[0].header["cd1_1"]*fcor
-        #hdulist_obs.close()
-
-        # salida=open(specout_dat_path,"w")
-        # for x,y in zip(wave_best,flux):
-        #     salida.write(str(x)+" "+str(y)+"\n")
-        # salida.close()
-
-
-        # if verbose:# #
-        #   print("=========")
-        #   print(wave_best[0])
-        #   print(wave_best[-1]-wave_best[-2])
-        #   print(wave_best[1]-wave_best[0])
-        #   print(wave_best[600]-wave_best[599])
-        # #print{"========="}()
-
-        # crval1_new = wave_best[0]
-        # cdelt1_new = hdulist_obs[0].header["cdelt1"]*fcor
-        # crpix1_new = 1
-        # cd1_1_new = cdelt1_new
-        # #if "cd1_1" in hdulist_obs[0].header.keys():
-        #     #cd1_1_new = hdulist_obs[0].header["cd1_1"]*fcor
-
-
-        # hdulist_obs.close()
-
-
-
-        # data, header = pf.getdata(infile, header=True)
-        # header['crval1']=crval1_new
-        # header['cdelt1']=cdelt1_new
-        # header['crpix1']=crpix1_new
-        # if "LTV1" in hdulist_obs[0].header.keys():
-        #     header['LTV1']=crpix1_new
-        # if "cd1_1" in hdulist_obs[0].header.keys():
-        #     header['cd1_1']=cd1_1_new
-        # header['DopCor']=(vcorr_best,'Vrad correction applied')
-        # spec_out = specout_fits_path
-        # pf.writeto(spec_out, data, header, overwrite=True)
-        # if verbose:# 
-        #   print(f"[Info] Corrected spectrum written in: {spec_out}")
-
-        # NEW SPEC END
-
-        # START RV_DAT OUT
-
-
-        # salida=open(specout_rvdat_path,"w")
-        # if len(regions)==1:
-        #     linsal = "%25s  %9.3f %9.3f %5.5f  %6.1f  %5.2f  %5.2f  %5.2f \n" % (os.path.basename(output_folder),vcorr_best,np.nan, chi2[i_best_hit], params_list[i_best_hit][0],params_list[i_best_hit][1],params_list[i_best_hit][2],params_list[i_best_hit][3])
-        #     salida.write(linsal)
-        # else:
-        #     linsal = "%25s  %9.3f %9.3f %5.5f  %6.1f  %5.2f  %5.2f  %5.2f \n" % (os.path.basename(output_folder),vcorr_best,err_vcorr_best, chi2[i_best_hit], params_list[i_best_hit][0],params_list[i_best_hit][1],params_list[i_best_hit][2],params_list[i_best_hit][3])
-        #     salida.write(linsal)
-        # salida.close()
-
-
-        salida = {"filn":[os.path.basename(output_folder)], "rv":[vcorr_best], "rv_chi":[chi2[i_best_hit]]}
+        salida = {"filn":[os.path.basename(output_folder)], "rv":[vcorr_best], "rv_chi":[chi2]}
         pd.DataFrame(salida).to_csv(specout_rvdat_path, index=False)
         if verbose:
             print(f"[Info] Results written in {specout_rvdat_path}\n")
@@ -437,7 +389,6 @@ def rv_measure(spec, grid, vmin, vmax, save_plots, save_files, output_folder, ve
         # END RV_DAT OUT
 
         return vcorr_best
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
