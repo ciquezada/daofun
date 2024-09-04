@@ -22,10 +22,6 @@ import argparse
 import os
 import scipy.optimize as opt
 import pandas as pd
-import pymc as pm
-import aesara.tensor as at
-from scipy.stats import gaussian_kde
-import seaborn as sns
 
 
 def oneGauss(x, A, mu, sig):
@@ -242,45 +238,14 @@ def rv_measure(spec, grid, vmin, vmax, save_plots, save_files, output_folder, ve
     flux_sint = fluxes_sint[i_best_hit]
     # spl = InterpolatedUnivariateSpline(wave_sint, flux_sint, k=3) # interpolate obs spec in common range with template
 
-    # Use PyMC to infer the best template and velocity correction
-    with pm.Model() as model:
-        # Velocity correction as a uniform prior 
-        # between v_min and v_max
-        vcorr = pm.Uniform('vcorr', lower=vcorr_prelim-200, upper=vcorr_prelim+200)
-        # vcorr = pm.Normal('vcorr', mu=vcorr_prelim, sigma=200)
-
-        # Model the observed flux as a function of the selected template and vcorr
-        fcor = pm.math.sqrt((1.0 - vcorr / vlight) / (1.0 + vcorr / vlight))
-        wave_corr = wave_ireg * fcor
-
-        # Interpolating the template to the corrected wavelengths
-        # Realizar la interpolación del flujo de la plantilla para las longitudes de onda corregidas
-        flux_interp = aesara_interpolate(wave_corr, wave_sint, flux_sint)
-
-        # Likelihood function: observed flux follows a normal distribution around the interpolated template flux
-        # likelihood = pm.Normal('obs', mu=flux_interp, sigma=flux_sig_ireg, observed=flux_ireg)
-        pm.Poisson('y', mu=flux_interp, observed=flux_ireg)
-
-        # Perform sampling
-        trace = pm.sample(5000, tune=3000, return_inferencedata=False, cores=1)
-
-
-    # def parameter_sigma(trace, hdi_prob=0.95):
-    #     lower = np.percentile(trace, (1 - hdi_prob) / 2 * 100, axis=0)
-    #     upper = np.percentile(trace, (1 + hdi_prob) / 2 * 100, axis=0)
-    #     return np.mean([np.mean(trace)-lower, upper-np.mean(trace)])
-
-    vcorr_best = np.median(trace['vcorr'])
-    vcorr_best_err = np.std(trace['vcorr'])# * 1.253
-
     #  Best velocity correction with best template
     #  Make correlation with the best template
-    # vcorr_best, vv_best, ccf_best = vcorr_maxccf_template(wave, flux_masked, region, median_flux_obs, wave_sint, flux_sint, vcorr_prelim, verbose)
+    vcorr_best, vv_best, ccf_best = vcorr_maxccf_template(wave, flux_masked, region, median_flux_obs, wave_sint, flux_sint, vcorr_prelim, verbose)
 
     fcor = np.sqrt( (1.0-vcorr_best/vlight) / (1.0+vcorr_best/vlight) )
     wave_best = wave*fcor
     # Compute template autocorrelation
-    # vv0,ccf0 = cross_correlate(wave_sint[i_cm],flux_sint[i_cm],wave_sint,flux_sint,vmin=-35,vmax=35, deltaV=0.1)
+    vv0,ccf0 = cross_correlate(wave_sint[i_cm],flux_sint[i_cm],wave_sint,flux_sint,vmin=-35,vmax=35, deltaV=0.1)
 
 
     # START PLOT
@@ -319,24 +284,28 @@ def rv_measure(spec, grid, vmin, vmax, save_plots, save_files, output_folder, ve
 
         # Plot best Vcorr with all correlation functions
         ax2=fig.add_subplot(gs1[0:30,22:40])
-
-        # Trazar el histograma con KDE en el eje específico
-        sns.histplot(trace['vcorr'], kde=True, ax=ax2)
-        # Dibujar la distribución de vcorr como un gráfico de pasos
-        # counts, bin_edges = np.histogram(trace['vcorr'], bins=30, density=True)
-        # ax2.step(bin_edges[:-1], counts, where='mid', color='green')
-
-        # Dibujar la línea vertical en la media de vcorr
-        ax2.axvline(vcorr_best, color='tomato', linestyle='-', label=f'Vobs = {vcorr_best:.2f} km/s ± {vcorr_best_err:.0f} km/s')
-
-        # Dibujar las líneas verticales para el rango de error (HDI al 95%)
-        ax2.axvline(vcorr_best - vcorr_best_err, color='blue', linestyle=':')
-        ax2.axvline(vcorr_best + vcorr_best_err, color='blue', linestyle=':')
-
-        # Etiquetas y leyenda
         ax2.set_xlabel("RV (km/s)")
-        ax2.set_ylabel("Probability Density")
-        ax2.legend()
+        ax2.set_ylabel("Cross Corr Norm.")
+        ax2.plot(vv_best, ccf_best/np.max(ccf_best),color="olivedrab",label="Cross-correlation")
+        handles, labels = ax2.get_legend_handles_labels()
+        handles_gral=[]
+        labels_gral=[]
+        handles_gral.append(handles[0])
+        labels_gral.append(labels[0])
+        ax2.plot(vv0+vcorr_best, ccf0/np.max(ccf0),color="black",ls="--",label="Auto-correlation\ntemplate")
+        handles, labels = ax2.get_legend_handles_labels()
+        handles_gral.append(handles[-1])
+        labels_gral.append(labels[-1])
+        ax2.xaxis.set_minor_locator(AutoMinorLocator(5))
+        yplotmin=np.min(ccf0/np.max(ccf0))
+        yl_i = yplotmin-0.05*(1.0-yplotmin)
+        yl_s = 1.0+0.1*(1.0-yplotmin)
+        ax2.set_ylim(yl_i,yl_s)
+        xl=ax2.get_xlim()
+        yl=ax2.get_ylim()
+        ax2.legend(handles_gral,labels_gral,loc=2,frameon=False,fontsize=11)
+        #ax2.text(xl[0]+0.68*(xl[1]-xl[0]),yl[0]+0.85*(yl[1]-yl[0]),"Cross-correlation\nbest template")
+        ax2.text(xl[0]+0.60*(xl[1]-xl[0]),yl[0]+0.7*(yl[1]-yl[0]),"Vobs =%9.3f km/s"%vcorr_best,color="tomato",fontsize=11)
 
 
         # Plot corrected spectrum vs template
