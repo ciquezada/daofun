@@ -262,7 +262,7 @@ def rv_measure(spec, grid, vmin, vmax, save_plots, save_files, output_folder, ve
         pm.Poisson('y', mu=flux_interp, observed=flux_ireg)
 
         # Perform sampling
-        trace = pm.sample(5000, tune=3000, return_inferencedata=False, cores=6)
+        trace = pm.sample(5000, tune=3000, return_inferencedata=False, cores=1)
 
 
     # def parameter_sigma(trace, hdi_prob=0.95):
